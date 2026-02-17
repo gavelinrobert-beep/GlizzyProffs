@@ -1,13 +1,12 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import sqlite3
+import asyncpg
 import os
-from typing import Optional
 
 # ── Configuration ──────────────────────────────────────────────
-# Set your bot token in an environment variable: DISCORD_TOKEN
-TOKEN = os.environ.get("DISCORD_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TOKEN        = os.environ["DISCORD_TOKEN"]
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 # TBC Professions
 PROFESSIONS = [
@@ -17,41 +16,32 @@ PROFESSIONS = [
 ]
 
 # ── Database Setup ─────────────────────────────────────────────
-def get_db():
-    db = sqlite3.connect("guild_recipes.db")
-    db.row_factory = sqlite3.Row
-    return db
+async def init_db(pool: asyncpg.Pool):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS members (
+                discord_id    TEXT PRIMARY KEY,
+                discord_name  TEXT NOT NULL,
+                char_name     TEXT NOT NULL,
+                realm         TEXT DEFAULT 'Unknown'
+            );
 
-def init_db():
-    db = get_db()
-    db.executescript("""
-        CREATE TABLE IF NOT EXISTS members (
-            discord_id    TEXT PRIMARY KEY,
-            discord_name  TEXT NOT NULL,
-            char_name     TEXT NOT NULL,
-            realm         TEXT DEFAULT 'Unknown'
-        );
+            CREATE TABLE IF NOT EXISTS professions (
+                id            SERIAL PRIMARY KEY,
+                discord_id    TEXT NOT NULL REFERENCES members(discord_id) ON DELETE CASCADE,
+                profession    TEXT NOT NULL,
+                skill_level   INTEGER DEFAULT 0,
+                UNIQUE(discord_id, profession)
+            );
 
-        CREATE TABLE IF NOT EXISTS professions (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            discord_id    TEXT NOT NULL,
-            profession    TEXT NOT NULL,
-            skill_level   INTEGER DEFAULT 0,
-            FOREIGN KEY (discord_id) REFERENCES members(discord_id),
-            UNIQUE(discord_id, profession)
-        );
-
-        CREATE TABLE IF NOT EXISTS recipes (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            discord_id    TEXT NOT NULL,
-            profession    TEXT NOT NULL,
-            recipe_name   TEXT NOT NULL,
-            notes         TEXT DEFAULT '',
-            FOREIGN KEY (discord_id) REFERENCES members(discord_id)
-        );
-    """)
-    db.commit()
-    db.close()
+            CREATE TABLE IF NOT EXISTS recipes (
+                id            SERIAL PRIMARY KEY,
+                discord_id    TEXT NOT NULL REFERENCES members(discord_id) ON DELETE CASCADE,
+                profession    TEXT NOT NULL,
+                recipe_name   TEXT NOT NULL,
+                notes         TEXT DEFAULT ''
+            );
+        """)
 
 # ── Bot Setup ──────────────────────────────────────────────────
 intents = discord.Intents.default()
@@ -60,14 +50,22 @@ intents.message_content = True
 class GuildBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
+        self.pool: asyncpg.Pool = None
 
     async def setup_hook(self):
+        self.pool = await asyncpg.create_pool(DATABASE_URL, ssl="require")
+        await init_db(self.pool)
         await self.tree.sync()
-        print(f"Slash commands synced.")
+        print("✅ Database connected and slash commands synced.")
 
     async def on_ready(self):
         print(f"✅ Logged in as {self.user} (ID: {self.user.id})")
         await self.change_presence(activity=discord.Game(name="WoW TBC | /help"))
+
+    async def close(self):
+        if self.pool:
+            await self.pool.close()
+        await super().close()
 
 bot = GuildBot()
 
@@ -85,13 +83,16 @@ async def profession_autocomplete(interaction: discord.Interaction, current: str
     realm="Your realm name (default: Unknown)"
 )
 async def register(interaction: discord.Interaction, char_name: str, realm: str = "Unknown"):
-    db = get_db()
-    db.execute(
-        "INSERT OR REPLACE INTO members (discord_id, discord_name, char_name, realm) VALUES (?, ?, ?, ?)",
-        (str(interaction.user.id), interaction.user.display_name, char_name, realm)
-    )
-    db.commit()
-    db.close()
+    async with bot.pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO members (discord_id, discord_name, char_name, realm)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (discord_id) DO UPDATE
+              SET discord_name = EXCLUDED.discord_name,
+                  char_name    = EXCLUDED.char_name,
+                  realm        = EXCLUDED.realm
+        """, str(interaction.user.id), interaction.user.display_name, char_name, realm)
+
     embed = discord.Embed(
         title="✅ Character Registered",
         description=f"**{char_name}** on **{realm}** has been registered to {interaction.user.mention}!",
@@ -108,22 +109,20 @@ async def register(interaction: discord.Interaction, char_name: str, realm: str 
 )
 @app_commands.autocomplete(profession=profession_autocomplete)
 async def add_profession(interaction: discord.Interaction, profession: str, skill_level: int = 0):
-    db = get_db()
-    member = db.execute("SELECT * FROM members WHERE discord_id = ?", (str(interaction.user.id),)).fetchone()
-    if not member:
-        await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
-        db.close()
-        return
-    if profession not in PROFESSIONS:
-        await interaction.response.send_message(f"❌ Unknown profession. Valid: {', '.join(PROFESSIONS)}", ephemeral=True)
-        db.close()
-        return
-    db.execute(
-        "INSERT OR REPLACE INTO professions (discord_id, profession, skill_level) VALUES (?, ?, ?)",
-        (str(interaction.user.id), profession, skill_level)
-    )
-    db.commit()
-    db.close()
+    async with bot.pool.acquire() as conn:
+        member = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(interaction.user.id))
+        if not member:
+            await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
+            return
+        if profession not in PROFESSIONS:
+            await interaction.response.send_message(f"❌ Unknown profession. Valid: {', '.join(PROFESSIONS)}", ephemeral=True)
+            return
+        await conn.execute("""
+            INSERT INTO professions (discord_id, profession, skill_level)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (discord_id, profession) DO UPDATE SET skill_level = EXCLUDED.skill_level
+        """, str(interaction.user.id), profession, skill_level)
+
     embed = discord.Embed(
         title="⚒️ Profession Updated",
         description=f"**{member['char_name']}** — {profession} ({skill_level}/375)",
@@ -140,27 +139,23 @@ async def add_profession(interaction: discord.Interaction, profession: str, skil
 )
 @app_commands.autocomplete(profession=profession_autocomplete)
 async def add_recipe(interaction: discord.Interaction, profession: str, recipe_name: str, notes: str = ""):
-    db = get_db()
-    member = db.execute("SELECT * FROM members WHERE discord_id = ?", (str(interaction.user.id),)).fetchone()
-    if not member:
-        await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
-        db.close()
-        return
-    # Prevent duplicates for same person
-    existing = db.execute(
-        "SELECT id FROM recipes WHERE discord_id = ? AND profession = ? AND LOWER(recipe_name) = LOWER(?)",
-        (str(interaction.user.id), profession, recipe_name)
-    ).fetchone()
-    if existing:
-        await interaction.response.send_message(f"⚠️ You already have **{recipe_name}** listed!", ephemeral=True)
-        db.close()
-        return
-    db.execute(
-        "INSERT INTO recipes (discord_id, profession, recipe_name, notes) VALUES (?, ?, ?, ?)",
-        (str(interaction.user.id), profession, recipe_name, notes)
-    )
-    db.commit()
-    db.close()
+    async with bot.pool.acquire() as conn:
+        member = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(interaction.user.id))
+        if not member:
+            await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
+            return
+        existing = await conn.fetchrow("""
+            SELECT id FROM recipes
+            WHERE discord_id = $1 AND profession = $2 AND LOWER(recipe_name) = LOWER($3)
+        """, str(interaction.user.id), profession, recipe_name)
+        if existing:
+            await interaction.response.send_message(f"⚠️ You already have **{recipe_name}** listed!", ephemeral=True)
+            return
+        await conn.execute("""
+            INSERT INTO recipes (discord_id, profession, recipe_name, notes)
+            VALUES ($1, $2, $3, $4)
+        """, str(interaction.user.id), profession, recipe_name, notes)
+
     embed = discord.Embed(
         title="📜 Recipe Added",
         description=f"**{recipe_name}** ({profession})\nAdded for **{member['char_name']}**",
@@ -172,18 +167,16 @@ async def add_recipe(interaction: discord.Interaction, profession: str, recipe_n
 
 # ── /remove_recipe ─────────────────────────────────────────────
 @bot.tree.command(name="remove_recipe", description="Remove a recipe from your list")
-@app_commands.describe(
-    recipe_name="Name of the recipe to remove"
-)
+@app_commands.describe(recipe_name="Name of the recipe to remove")
 async def remove_recipe(interaction: discord.Interaction, recipe_name: str):
-    db = get_db()
-    result = db.execute(
-        "DELETE FROM recipes WHERE discord_id = ? AND LOWER(recipe_name) = LOWER(?)",
-        (str(interaction.user.id), recipe_name)
-    )
-    db.commit()
-    db.close()
-    if result.rowcount == 0:
+    async with bot.pool.acquire() as conn:
+        result = await conn.execute("""
+            DELETE FROM recipes
+            WHERE discord_id = $1 AND LOWER(recipe_name) = LOWER($2)
+        """, str(interaction.user.id), recipe_name)
+
+    deleted = int(result.split(" ")[-1])
+    if deleted == 0:
         await interaction.response.send_message(f"❌ No recipe named **{recipe_name}** found on your character.", ephemeral=True)
     else:
         await interaction.response.send_message(f"🗑️ Removed **{recipe_name}** from your recipes.")
@@ -192,24 +185,20 @@ async def remove_recipe(interaction: discord.Interaction, recipe_name: str):
 @bot.tree.command(name="who_can_craft", description="Find guild members who know a specific recipe")
 @app_commands.describe(recipe_name="Part of the recipe name to search for")
 async def who_can_craft(interaction: discord.Interaction, recipe_name: str):
-    db = get_db()
-    rows = db.execute("""
-        SELECT m.char_name, m.discord_name, r.recipe_name, r.profession, r.notes
-        FROM recipes r
-        JOIN members m ON r.discord_id = m.discord_id
-        WHERE LOWER(r.recipe_name) LIKE LOWER(?)
-        ORDER BY r.profession, m.char_name
-    """, (f"%{recipe_name}%",)).fetchall()
-    db.close()
+    async with bot.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT m.char_name, m.discord_name, r.recipe_name, r.profession, r.notes
+            FROM recipes r
+            JOIN members m ON r.discord_id = m.discord_id
+            WHERE LOWER(r.recipe_name) LIKE LOWER($1)
+            ORDER BY r.profession, m.char_name
+        """, f"%{recipe_name}%")
 
     if not rows:
         await interaction.response.send_message(f"❌ No guild members found with a recipe matching **{recipe_name}**.", ephemeral=True)
         return
 
-    embed = discord.Embed(
-        title=f"🔍 Who can craft: \"{recipe_name}\"",
-        color=0xF4A92A
-    )
+    embed = discord.Embed(title=f"🔍 Who can craft: \"{recipe_name}\"", color=0xF4A92A)
     for row in rows:
         val = f"**Profession:** {row['profession']}"
         if row['notes']:
@@ -223,77 +212,56 @@ async def who_can_craft(interaction: discord.Interaction, recipe_name: str):
 @app_commands.describe(profession="The profession to list recipes for")
 @app_commands.autocomplete(profession=profession_autocomplete)
 async def list_recipes(interaction: discord.Interaction, profession: str):
-    db = get_db()
-    rows = db.execute("""
-        SELECT m.char_name, r.recipe_name, r.notes
-        FROM recipes r
-        JOIN members m ON r.discord_id = m.discord_id
-        WHERE r.profession = ?
-        ORDER BY r.recipe_name, m.char_name
-    """, (profession,)).fetchall()
-    db.close()
+    async with bot.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT m.char_name, r.recipe_name, r.notes
+            FROM recipes r
+            JOIN members m ON r.discord_id = m.discord_id
+            WHERE r.profession = $1
+            ORDER BY r.recipe_name, m.char_name
+        """, profession)
 
     if not rows:
         await interaction.response.send_message(f"❌ No recipes found for **{profession}** in the guild.", ephemeral=True)
         return
 
-    # Group by recipe name
     recipe_map = {}
     for row in rows:
         key = row['recipe_name']
-        if key not in recipe_map:
-            recipe_map[key] = []
-        entry = row['char_name']
-        if row['notes']:
-            entry += f" *({row['notes']})*"
-        recipe_map[key].append(entry)
+        entry = row['char_name'] + (f" *({row['notes']})*" if row['notes'] else "")
+        recipe_map.setdefault(key, []).append(entry)
 
-    embed = discord.Embed(
-        title=f"📚 Guild {profession} Recipes",
-        color=0x9B59B6
-    )
-    # Discord embeds have a 6000 char limit; paginate if needed
-    lines = []
-    for recipe, crafters in sorted(recipe_map.items()):
-        lines.append(f"**{recipe}** — {', '.join(crafters)}")
-
-    # Split into chunks of 20
-    chunk = lines[:20]
-    embed.description = "\n".join(chunk)
+    lines = [f"**{r}** — {', '.join(c)}" for r, c in sorted(recipe_map.items())]
+    embed = discord.Embed(title=f"📚 Guild {profession} Recipes", color=0x9B59B6)
+    embed.description = "\n".join(lines[:20])
+    footer = f"{len(lines)} recipe(s) total"
     if len(lines) > 20:
-        embed.set_footer(text=f"Showing 20 of {len(lines)} recipes. Search with /who_can_craft for more.")
-    else:
-        embed.set_footer(text=f"{len(lines)} recipe(s) total")
+        footer = f"Showing 20 of {len(lines)} recipes. Use /who_can_craft to search for more."
+    embed.set_footer(text=footer)
     await interaction.response.send_message(embed=embed)
 
 # ── /my_recipes ────────────────────────────────────────────────
 @bot.tree.command(name="my_recipes", description="View all your registered recipes")
 async def my_recipes(interaction: discord.Interaction):
-    db = get_db()
-    member = db.execute("SELECT * FROM members WHERE discord_id = ?", (str(interaction.user.id),)).fetchone()
-    if not member:
-        await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
-        db.close()
-        return
-    rows = db.execute("""
-        SELECT profession, recipe_name, notes FROM recipes
-        WHERE discord_id = ?
-        ORDER BY profession, recipe_name
-    """, (str(interaction.user.id),)).fetchall()
-    db.close()
+    async with bot.pool.acquire() as conn:
+        member = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(interaction.user.id))
+        if not member:
+            await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
+            return
+        rows = await conn.fetch("""
+            SELECT profession, recipe_name, notes FROM recipes
+            WHERE discord_id = $1
+            ORDER BY profession, recipe_name
+        """, str(interaction.user.id))
 
-    embed = discord.Embed(
-        title=f"📜 {member['char_name']}'s Recipes",
-        color=0x1ABC9C
-    )
+    embed = discord.Embed(title=f"📜 {member['char_name']}'s Recipes", color=0x1ABC9C)
     if not rows:
         embed.description = "No recipes added yet. Use `/add_recipe` to add some!"
     else:
         prof_map = {}
         for row in rows:
-            prof_map.setdefault(row['profession'], []).append(
-                row['recipe_name'] + (f" *({row['notes']})*" if row['notes'] else "")
-            )
+            entry = row['recipe_name'] + (f" *({row['notes']})*" if row['notes'] else "")
+            prof_map.setdefault(row['profession'], []).append(entry)
         for prof, rlist in sorted(prof_map.items()):
             embed.add_field(name=f"⚒️ {prof}", value="\n".join(rlist), inline=False)
         embed.set_footer(text=f"{len(rows)} recipe(s) total")
@@ -302,34 +270,27 @@ async def my_recipes(interaction: discord.Interaction):
 # ── /guild_roster ──────────────────────────────────────────────
 @bot.tree.command(name="guild_roster", description="Show all registered guild members and their professions")
 async def guild_roster(interaction: discord.Interaction):
-    db = get_db()
-    members = db.execute("SELECT * FROM members ORDER BY char_name").fetchall()
-    if not members:
-        await interaction.response.send_message("❌ No members registered yet!", ephemeral=True)
-        db.close()
-        return
+    async with bot.pool.acquire() as conn:
+        members = await conn.fetch("SELECT * FROM members ORDER BY char_name")
+        if not members:
+            await interaction.response.send_message("❌ No members registered yet!", ephemeral=True)
+            return
 
-    embed = discord.Embed(title="⚔️ Guild Roster", color=0xF4A92A)
-    for m in members:
-        profs = db.execute(
-            "SELECT profession, skill_level FROM professions WHERE discord_id = ? ORDER BY profession",
-            (m['discord_id'],)
-        ).fetchall()
-        recipe_count = db.execute(
-            "SELECT COUNT(*) as cnt FROM recipes WHERE discord_id = ?", (m['discord_id'],)
-        ).fetchone()['cnt']
-
-        if profs:
-            prof_str = ", ".join(f"{p['profession']} ({p['skill_level']})" for p in profs)
-        else:
-            prof_str = "*No professions added*"
-
-        embed.add_field(
-            name=f"🧙 {m['char_name']} ({m['realm']})",
-            value=f"{prof_str}\n📜 {recipe_count} recipe(s) registered",
-            inline=False
-        )
-    db.close()
+        embed = discord.Embed(title="⚔️ Guild Roster", color=0xF4A92A)
+        for m in members:
+            profs = await conn.fetch(
+                "SELECT profession, skill_level FROM professions WHERE discord_id = $1 ORDER BY profession",
+                m['discord_id']
+            )
+            recipe_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM recipes WHERE discord_id = $1", m['discord_id']
+            )
+            prof_str = ", ".join(f"{p['profession']} ({p['skill_level']})" for p in profs) or "*No professions added*"
+            embed.add_field(
+                name=f"🧙 {m['char_name']} ({m['realm']})",
+                value=f"{prof_str}\n📜 {recipe_count} recipe(s) registered",
+                inline=False
+            )
     embed.set_footer(text=f"{len(members)} member(s) registered")
     await interaction.response.send_message(embed=embed)
 
@@ -341,7 +302,7 @@ async def help_cmd(interaction: discord.Interaction):
         description="Track guild recipes and professions for Burning Crusade Anniversary!",
         color=0xF4A92A
     )
-    commands_info = [
+    for cmd, desc in [
         ("/register", "Register your character with the bot"),
         ("/add_profession", "Add/update a profession and skill level"),
         ("/add_recipe", "Add a recipe you know to the guild database"),
@@ -350,14 +311,11 @@ async def help_cmd(interaction: discord.Interaction):
         ("/list_recipes", "List all guild recipes for a profession"),
         ("/my_recipes", "View all your registered recipes (private)"),
         ("/guild_roster", "Show all members and their professions"),
-    ]
-    for cmd, desc in commands_info:
+    ]:
         embed.add_field(name=cmd, value=desc, inline=False)
     embed.set_footer(text="For Azeroth! 🏰")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ── Run ────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    init_db()
-    print("Starting WoW TBC Guild Recipe Bot...")
     bot.run(TOKEN)
