@@ -3,10 +3,23 @@ from discord.ext import commands
 from discord import app_commands
 import asyncpg
 import os
+import urllib.parse
 
 # ── Configuration ──────────────────────────────────────────────
 TOKEN        = os.environ["DISCORD_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
+
+# Parse DATABASE_URL manually to work around Python 3.13 + asyncpg hostname parsing bug
+def parse_db_url(url: str) -> dict:
+    parsed = urllib.parse.urlparse(url)
+    return {
+        "host":     parsed.hostname,
+        "port":     parsed.port or 5432,
+        "user":     parsed.username,
+        "password": urllib.parse.unquote(parsed.password),
+        "database": parsed.path.lstrip("/"),
+        "ssl":      "require",
+    }
 
 # TBC Professions
 PROFESSIONS = [
@@ -53,7 +66,7 @@ class GuildBot(commands.Bot):
         self.pool: asyncpg.Pool = None
 
     async def setup_hook(self):
-        self.pool = await asyncpg.create_pool(DATABASE_URL, ssl="require")
+        self.pool = await asyncpg.create_pool(**parse_db_url(DATABASE_URL))
         await init_db(self.pool)
         await self.tree.sync()
         print("✅ Database connected and slash commands synced.")
