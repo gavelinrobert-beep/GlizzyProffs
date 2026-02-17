@@ -10,14 +10,19 @@ TOKEN        = os.environ["DISCORD_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 # Parse DATABASE_URL manually to work around Python 3.13 + asyncpg hostname parsing bug
+# (urlparse in 3.13 incorrectly rejects valid hostnames like *.pooler.supabase.com)
 def parse_db_url(url: str) -> dict:
-    parsed = urllib.parse.urlparse(url)
+    import re
+    m = re.match(r"postgres(?:ql)?://([^:]+):([^@]+)@([^:/]+)(?::(\d+))?/(.+)", url)
+    if not m:
+        raise ValueError("Could not parse DATABASE_URL")
+    user, password, host, port, database = m.groups()
     return {
-        "host":     parsed.hostname,
-        "port":     parsed.port or 5432,
-        "user":     parsed.username,
-        "password": urllib.parse.unquote(parsed.password),
-        "database": parsed.path.lstrip("/"),
+        "host":     host,
+        "port":     int(port) if port else 5432,
+        "user":     user,
+        "password": urllib.parse.unquote(password),
+        "database": database,
         "ssl":      "require",
     }
 
