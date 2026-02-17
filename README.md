@@ -1,0 +1,2 @@
+# GlizzyProffs
+Bot for professions
