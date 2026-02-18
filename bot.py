@@ -91,6 +91,24 @@ async def init_db(pool: asyncpg.Pool):
                 notified      BOOLEAN DEFAULT FALSE,
                 UNIQUE(discord_id, recipe_name)
             );
+
+            CREATE TABLE IF NOT EXISTS bank_config (
+                guild_id      TEXT PRIMARY KEY,
+                channel_id    TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS bank_requests (
+                id            SERIAL PRIMARY KEY,
+                discord_id    TEXT NOT NULL REFERENCES members(discord_id) ON DELETE CASCADE,
+                item_name     TEXT NOT NULL,
+                quantity      INTEGER DEFAULT 1,
+                reason        TEXT DEFAULT '',
+                status        TEXT DEFAULT 'pending',
+                officer_id    TEXT,
+                officer_note  TEXT DEFAULT '',
+                message_id    TEXT,
+                created_at    TIMESTAMPTZ DEFAULT NOW()
+            );
         """)
 
 # ── Live Embed Builder ─────────────────────────────────────────
@@ -237,6 +255,34 @@ async def register(interaction: discord.Interaction, char_name: str, realm: str 
         color=0xF4A92A
     )
     embed.set_footer(text="Use /add_profession to add your professions.")
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /register_member (officer) ─────────────────────────────────
+@bot.tree.command(name="register_member", description="Register a guild member and link them to their Discord (officers only)")
+@app_commands.describe(
+    member="The Discord user to register",
+    char_name="Their WoW character name",
+    realm="Their realm (optional)"
+)
+@app_commands.checks.has_permissions(manage_roles=True)
+async def register_member(interaction: discord.Interaction, member: discord.Member, char_name: str, realm: str = "Unknown"):
+    async with bot.pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO members (discord_id, discord_name, char_name, realm)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (discord_id) DO UPDATE
+              SET discord_name = EXCLUDED.discord_name,
+                  char_name    = EXCLUDED.char_name,
+                  realm        = EXCLUDED.realm
+        """, str(member.id), member.display_name, char_name, realm)
+
+    embed = discord.Embed(
+        title="✅ Member Registered",
+        description=f"**{char_name}** has been linked to {member.mention}!",
+        color=0xF4A92A
+    )
+    embed.set_footer(text=f"Registered by {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
 # ── /add_profession ────────────────────────────────────────────
@@ -493,7 +539,7 @@ async def clear_cooldown(interaction: discord.Interaction, recipe_name: str):
 async def who_can_craft(interaction: discord.Interaction, recipe_name: str):
     async with bot.pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT m.char_name, m.discord_name, r.recipe_name, r.profession, r.notes
+            SELECT m.char_name, m.discord_name, m.discord_id, r.recipe_name, r.profession, r.notes
             FROM recipes r
             JOIN members m ON r.discord_id = m.discord_id
             WHERE LOWER(r.recipe_name) LIKE LOWER($1)
@@ -507,9 +553,10 @@ async def who_can_craft(interaction: discord.Interaction, recipe_name: str):
     embed = discord.Embed(title=f"🔍 Who can craft: \"{recipe_name}\"", color=0xF4A92A)
     for row in rows:
         val = f"**Profession:** {row['profession']}"
+        val += f"\n**Discord:** <@{row['discord_id']}>"
         if row['notes']:
             val += f"\n**Notes:** {row['notes']}"
-        embed.add_field(name=f"🧙 {row['char_name']} ({row['discord_name']})", value=val, inline=False)
+        embed.add_field(name=f"🧙 {row['char_name']}", value=val, inline=False)
     embed.set_footer(text=f"Found {len(rows)} result(s)")
     await interaction.response.send_message(embed=embed)
 
@@ -558,8 +605,8 @@ async def guild_roster(interaction: discord.Interaction):
             )
             prof_str = ", ".join(f"{p['profession']} ({p['skill_level']})" for p in profs) or "*No professions added*"
             embed.add_field(
-                name=f"🧙 {m['char_name']} ({m['realm']})",
-                value=f"{prof_str}\n📜 {recipe_count} recipe(s) registered",
+                name=f"🧙 {m['char_name']}",
+                value=f"<@{m['discord_id']}> {f"({m['realm']})" if m['realm'] != 'Unknown' else ''}\n{prof_str}\n📜 {recipe_count} recipe(s) registered",
                 inline=False
             )
     embed.set_footer(text=f"{len(members)} member(s) registered")
@@ -575,7 +622,8 @@ async def help_cmd(interaction: discord.Interaction):
     )
     sections = [
         ("📋 Registration", [
-            ("/register", "Register your WoW character"),
+            ("/register", "Register your own WoW character"),
+            ("/register_member", "Link a member\'s character to their Discord (officers only)"),
             ("/add_profession", "Add/update a profession and skill level"),
             ("/guild_roster", "Show all members and their professions"),
         ]),
@@ -595,6 +643,12 @@ async def help_cmd(interaction: discord.Interaction):
             ("/guild_cooldowns", "See all guild cooldowns"),
             ("/clear_cooldown", "Remove a cooldown timer"),
         ]),
+        ("🏦 Guild Bank", [
+            ("/setup_bank", "Set the bank request channel (officers only)"),
+            ("/bank_request", "Request an item from the guild bank"),
+            ("/my_requests", "View your own bank requests (private)"),
+            ("/pending_requests", "View all pending bank requests"),
+        ]),
     ]
     for section, cmds in sections:
         embed.add_field(
@@ -604,6 +658,224 @@ async def help_cmd(interaction: discord.Interaction):
         )
     embed.set_footer(text="For Azeroth! 🏰")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ── Bank Request Views (Buttons) ───────────────────────────────
+class BankRequestView(discord.ui.View):
+    def __init__(self, request_id: int):
+        super().__init__(timeout=None)  # Persistent — survives bot restarts
+        self.request_id = request_id
+
+    @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.success, custom_id_prefix="approve")
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await handle_bank_decision(interaction, self.request_id, "approved")
+
+    @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, custom_id_prefix="deny")
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await handle_bank_decision(interaction, self.request_id, "denied")
+
+
+async def handle_bank_decision(interaction: discord.Interaction, request_id: int, decision: str):
+    # Officers only
+    if not interaction.user.guild_permissions.manage_roles:
+        await interaction.response.send_message("❌ Only officers can approve/deny requests.", ephemeral=True)
+        return
+
+    # Ask for an optional note via a modal
+    class NoteModal(discord.ui.Modal, title=f"{'Approve' if decision == 'approved' else 'Deny'} Request"):
+        note = discord.ui.TextInput(
+            label="Officer note (optional)",
+            placeholder="e.g. Check tab 2, or 'We're out of stock'",
+            required=False,
+            max_length=200
+        )
+
+        async def on_submit(self, modal_interaction: discord.Interaction):
+            officer_note = self.note.value or ""
+            async with bot.pool.acquire() as conn:
+                row = await conn.fetchrow("""
+                    UPDATE bank_requests
+                    SET status = $1, officer_id = $2, officer_note = $3
+                    WHERE id = $4
+                    RETURNING discord_id, item_name, quantity, reason
+                """, decision, str(modal_interaction.user.id), officer_note, request_id)
+
+            if not row:
+                await modal_interaction.response.send_message("❌ Request not found.", ephemeral=True)
+                return
+
+            # Update the officer channel embed
+            color = 0x2ECC71 if decision == "approved" else 0xE74C3C
+            status_icon = "✅" if decision == "approved" else "❌"
+            embed = discord.Embed(
+                title=f"{status_icon} Bank Request {decision.capitalize()}",
+                color=color,
+                timestamp=datetime.now(timezone.utc)
+            )
+            embed.add_field(name="Item", value=f"{row['item_name']} x{row['quantity']}", inline=True)
+            embed.add_field(name="Reason", value=row['reason'] or "*None given*", inline=True)
+            embed.add_field(name="Decision by", value=modal_interaction.user.mention, inline=True)
+            if officer_note:
+                embed.add_field(name="Note", value=officer_note, inline=False)
+
+            await modal_interaction.response.edit_message(embed=embed, view=None)
+
+            # DM the requester
+            requester = bot.get_user(int(row['discord_id']))
+            if requester:
+                try:
+                    dm_embed = discord.Embed(
+                        title=f"{status_icon} Guild Bank Request {decision.capitalize()}",
+                        description=f"Your request for **{row['item_name']} x{row['quantity']}** has been **{decision}**.",
+                        color=color
+                    )
+                    if officer_note:
+                        dm_embed.add_field(name="Officer note", value=officer_note)
+                    dm_embed.set_footer(text=f"Decided by {modal_interaction.user.display_name}")
+                    await requester.send(embed=dm_embed)
+                except discord.Forbidden:
+                    pass  # DMs disabled
+
+    await interaction.response.send_modal(NoteModal())
+
+
+# ── /setup_bank ────────────────────────────────────────────────
+@bot.tree.command(name="setup_bank", description="Set the channel where bank requests will be posted (officers only)")
+@app_commands.describe(channel="The channel to post bank requests in")
+@app_commands.checks.has_permissions(manage_roles=True)
+async def setup_bank(interaction: discord.Interaction, channel: discord.TextChannel):
+    async with bot.pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO bank_config (guild_id, channel_id)
+            VALUES ($1, $2)
+            ON CONFLICT (guild_id) DO UPDATE SET channel_id = EXCLUDED.channel_id
+        """, str(interaction.guild.id), str(channel.id))
+
+    await interaction.response.send_message(
+        f"✅ Bank requests will now be posted in {channel.mention}. Members can use `/bank_request` to submit requests.",
+        ephemeral=True
+    )
+
+
+# ── /bank_request ──────────────────────────────────────────────
+@bot.tree.command(name="bank_request", description="Request an item from the guild bank")
+@app_commands.describe(
+    item_name="Name of the item you need",
+    quantity="How many you need",
+    reason="Why you need it (e.g. 'for flask crafting')"
+)
+async def bank_request(interaction: discord.Interaction, item_name: str, quantity: int = 1, reason: str = ""):
+    async with bot.pool.acquire() as conn:
+        member = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(interaction.user.id))
+        if not member:
+            await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
+            return
+
+        config = await conn.fetchrow("SELECT channel_id FROM bank_config WHERE guild_id = $1", str(interaction.guild.id))
+        if not config:
+            await interaction.response.send_message("❌ Bank requests aren't set up yet. Ask an officer to use `/setup_bank`.", ephemeral=True)
+            return
+
+        # Check for duplicate pending request
+        existing = await conn.fetchrow("""
+            SELECT id FROM bank_requests
+            WHERE discord_id = $1 AND LOWER(item_name) = LOWER($2) AND status = 'pending'
+        """, str(interaction.user.id), item_name)
+        if existing:
+            await interaction.response.send_message(f"⚠️ You already have a pending request for **{item_name}**.", ephemeral=True)
+            return
+
+        # Insert the request
+        request_id = await conn.fetchval("""
+            INSERT INTO bank_requests (discord_id, item_name, quantity, reason)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+        """, str(interaction.user.id), item_name, quantity, reason)
+
+    # Post to officer channel
+    channel = bot.get_channel(int(config['channel_id']))
+    if not channel:
+        await interaction.response.send_message("❌ Bank request channel not found. Ask an officer to re-run `/setup_bank`.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🏦 New Bank Request",
+        color=0xF4A92A,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(name="Character", value=member['char_name'], inline=True)
+    embed.add_field(name="Item", value=f"{item_name} x{quantity}", inline=True)
+    embed.add_field(name="Reason", value=reason or "*None given*", inline=False)
+    embed.set_footer(text=f"Request #{request_id}")
+
+    view = BankRequestView(request_id)
+    message = await channel.send(embed=embed, view=view)
+
+    # Store the message ID so we can edit it later
+    async with bot.pool.acquire() as conn:
+        await conn.execute("UPDATE bank_requests SET message_id = $1 WHERE id = $2", str(message.id), request_id)
+
+    await interaction.response.send_message(
+        f"✅ Your request for **{item_name} x{quantity}** has been submitted! You'll get a DM when an officer responds.",
+        ephemeral=True
+    )
+
+
+# ── /my_requests ───────────────────────────────────────────────
+@bot.tree.command(name="my_requests", description="View your bank requests")
+async def my_requests(interaction: discord.Interaction):
+    async with bot.pool.acquire() as conn:
+        member = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(interaction.user.id))
+        if not member:
+            await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
+            return
+        rows = await conn.fetch("""
+            SELECT item_name, quantity, reason, status, officer_note, created_at
+            FROM bank_requests WHERE discord_id = $1
+            ORDER BY created_at DESC LIMIT 10
+        """, str(interaction.user.id))
+
+    embed = discord.Embed(title=f"🏦 {member['char_name']}'s Bank Requests", color=0xF4A92A)
+    if not rows:
+        embed.description = "No requests yet. Use `/bank_request` to submit one!"
+    else:
+        for row in rows:
+            icon = {"pending": "⏳", "approved": "✅", "denied": "❌"}.get(row['status'], "❓")
+            val = f"Qty: {row['quantity']}"
+            if row['reason']:
+                val += f" | Reason: {row['reason']}"
+            if row['officer_note']:
+                val += f"\nOfficer note: *{row['officer_note']}*"
+            embed.add_field(name=f"{icon} {row['item_name']} ({row['status']})", value=val, inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ── /pending_requests ──────────────────────────────────────────
+@bot.tree.command(name="pending_requests", description="View all pending guild bank requests")
+async def pending_requests(interaction: discord.Interaction):
+    async with bot.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT b.id, b.item_name, b.quantity, b.reason, b.created_at, m.char_name
+            FROM bank_requests b
+            JOIN members m ON b.discord_id = m.discord_id
+            WHERE b.status = 'pending'
+            ORDER BY b.created_at ASC
+        """)
+
+    embed = discord.Embed(title="🏦 Pending Bank Requests", color=0xF4A92A)
+    if not rows:
+        embed.description = "No pending requests!"
+    else:
+        for row in rows:
+            val = f"**{row['item_name']} x{row['quantity']}**"
+            if row['reason']:
+                val += f"\n*{row['reason']}*"
+            ts = int(row['created_at'].timestamp())
+            val += f"\nRequested <t:{ts}:R>"
+            embed.add_field(name=f"#{row['id']} — {row['char_name']}", value=val, inline=False)
+        embed.set_footer(text=f"{len(rows)} pending request(s)")
+    await interaction.response.send_message(embed=embed)
+
 
 # ── Run ────────────────────────────────────────────────────────
 if __name__ == "__main__":
