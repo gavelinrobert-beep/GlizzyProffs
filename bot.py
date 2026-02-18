@@ -666,11 +666,11 @@ class BankRequestView(discord.ui.View):
         super().__init__(timeout=None)  # Persistent — survives bot restarts
         self.request_id = request_id
 
-    @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.success, custom_id_prefix="approve")
+    @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.success, custom_id="bank_approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         await handle_bank_decision(interaction, self.request_id, "approved")
 
-    @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, custom_id_prefix="deny")
+    @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, custom_id="bank_deny")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
         await handle_bank_decision(interaction, self.request_id, "denied")
 
