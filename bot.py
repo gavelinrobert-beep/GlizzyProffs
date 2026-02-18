@@ -179,7 +179,10 @@ class GuildBot(commands.Bot):
     async def setup_hook(self):
         self.pool = await asyncpg.create_pool(**parse_db_url(DATABASE_URL))
         await init_db(self.pool)
+        # Force clear and re-sync all commands
+        self.tree.clear_commands(guild=None)
         await self.tree.sync()
+        print("✅ Commands cleared and re-synced globally.")
         # Start background cooldown checker
         self.loop.create_task(cooldown_checker(self))
         # Re-register persistent bank request views so buttons work after restarts
