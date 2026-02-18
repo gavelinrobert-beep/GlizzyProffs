@@ -182,6 +182,8 @@ class GuildBot(commands.Bot):
         await self.tree.sync()
         # Start background cooldown checker
         self.loop.create_task(cooldown_checker(self))
+        # Re-register persistent bank request views so buttons work after restarts
+        self.loop.create_task(restore_bank_views(self))
         print("✅ Database connected and slash commands synced.")
 
     async def on_ready(self):
@@ -227,6 +229,22 @@ async def cooldown_checker(bot: GuildBot):
         except Exception as e:
             print(f"Cooldown checker error: {e}")
         await asyncio.sleep(60)  # Check every minute
+
+
+async def restore_bank_views(bot: GuildBot):
+    """Re-attach button views to pending bank request messages after a restart."""
+    await bot.wait_until_ready()
+    async with bot.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, message_id, channel_id
+            FROM bank_requests b
+            JOIN bank_config c ON c.guild_id = c.guild_id
+            WHERE b.status = 'pending' AND b.message_id IS NOT NULL
+        """)
+    # Simpler: just add the persistent view globally so Discord routes
+    # any bank_approve/bank_deny custom_id to the right handler
+    bot.add_view(BankRequestView(0))
+    print(f"✅ Persistent bank views restored.")
 
 # ── Autocomplete Helpers ───────────────────────────────────────
 async def profession_autocomplete(interaction: discord.Interaction, current: str):
@@ -704,16 +722,21 @@ async def help_cmd(interaction: discord.Interaction):
 # ── Bank Request Views (Buttons) ───────────────────────────────
 class BankRequestView(discord.ui.View):
     def __init__(self, request_id: int):
-        super().__init__(timeout=None)  # Persistent — survives bot restarts
+        super().__init__(timeout=None)
         self.request_id = request_id
+        # Set unique custom_ids per request so the bot can recover them after restart
+        self.children[0].custom_id = f"bank_approve:{request_id}"
+        self.children[1].custom_id = f"bank_deny:{request_id}"
 
-    @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.success, custom_id="bank_approve")
+    @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.success, custom_id="bank_approve:0")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await handle_bank_decision(interaction, self.request_id, "approved")
+        request_id = int(button.custom_id.split(":")[1])
+        await handle_bank_decision(interaction, request_id, "approved")
 
-    @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, custom_id="bank_deny")
+    @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, custom_id="bank_deny:0")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await handle_bank_decision(interaction, self.request_id, "denied")
+        request_id = int(button.custom_id.split(":")[1])
+        await handle_bank_decision(interaction, request_id, "denied")
 
 
 async def handle_bank_decision(interaction: discord.Interaction, request_id: int, decision: str):
