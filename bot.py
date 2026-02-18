@@ -347,6 +347,46 @@ async def add_recipe(interaction: discord.Interaction, profession: str, recipe_n
     await interaction.response.send_message(embed=embed)
     await refresh_live_embed(bot.pool, bot, profession)
 
+
+# ── /add_recipe_for (officer) ──────────────────────────────────
+@bot.tree.command(name="add_recipe_for", description="Add a recipe for another guild member (officers only)")
+@app_commands.describe(
+    member="The Discord user to add the recipe for",
+    profession="The profession this recipe belongs to",
+    recipe_name="Name of the recipe",
+    notes="Optional notes (e.g. 'cooldown 4 days')"
+)
+@app_commands.autocomplete(profession=profession_autocomplete)
+@app_commands.checks.has_permissions(manage_roles=True)
+async def add_recipe_for(interaction: discord.Interaction, member: discord.Member, profession: str, recipe_name: str, notes: str = ""):
+    async with bot.pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(member.id))
+        if not target:
+            await interaction.response.send_message(f"❌ {member.mention} isn't registered yet! Use `/register_member` first.", ephemeral=True)
+            return
+        existing = await conn.fetchrow("""
+            SELECT id FROM recipes
+            WHERE discord_id = $1 AND profession = $2 AND LOWER(recipe_name) = LOWER($3)
+        """, str(member.id), profession, recipe_name)
+        if existing:
+            await interaction.response.send_message(f"⚠️ **{target['char_name']}** already has **{recipe_name}** listed!", ephemeral=True)
+            return
+        await conn.execute("""
+            INSERT INTO recipes (discord_id, profession, recipe_name, notes)
+            VALUES ($1, $2, $3, $4)
+        """, str(member.id), profession, recipe_name, notes)
+
+    embed = discord.Embed(
+        title="📜 Recipe Added",
+        description=f"**{recipe_name}** ({profession}) — Added for **{target['char_name']}** ({member.mention})",
+        color=0x2ECC71
+    )
+    if notes:
+        embed.add_field(name="Notes", value=notes)
+    embed.set_footer(text=f"Added by {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+    await refresh_live_embed(bot.pool, bot, profession)
+
 # ── /remove_recipe ─────────────────────────────────────────────
 @bot.tree.command(name="remove_recipe", description="Remove a recipe from your list")
 @app_commands.describe(recipe_name="Name of the recipe to remove")
@@ -629,6 +669,7 @@ async def help_cmd(interaction: discord.Interaction):
         ]),
         ("📜 Recipes", [
             ("/add_recipe", "Add a recipe you know"),
+            ("/add_recipe_for", "Add a recipe for another member (officers only)"),
             ("/remove_recipe", "Remove a recipe"),
             ("/update_recipe", "Update notes on a recipe"),
             ("/who_can_craft", "Find who can craft a specific item"),
