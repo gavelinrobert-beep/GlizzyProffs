@@ -3,16 +3,39 @@ from discord.ext import commands
 from discord import app_commands
 import asyncpg
 import os
+import re
 import urllib.parse
+from datetime import datetime, timezone, timedelta
 
 # ── Configuration ──────────────────────────────────────────────
 TOKEN        = os.environ["DISCORD_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
 
-# Parse DATABASE_URL manually to work around Python 3.13 + asyncpg hostname parsing bug
-# (urlparse in 3.13 incorrectly rejects valid hostnames like *.pooler.supabase.com)
+# TBC Professions
+PROFESSIONS = [
+    "Alchemy", "Blacksmithing", "Enchanting", "Engineering",
+    "Herbalism", "Jewelcrafting", "Leatherworking", "Mining",
+    "Skinning", "Tailoring", "Cooking", "First Aid", "Fishing"
+]
+
+PROFESSION_COLORS = {
+    "Alchemy":        0x9B59B6,
+    "Blacksmithing":  0x7F8C8D,
+    "Enchanting":     0xE91E63,
+    "Engineering":    0xF39C12,
+    "Herbalism":      0x2ECC71,
+    "Jewelcrafting":  0x3498DB,
+    "Leatherworking": 0xA0522D,
+    "Mining":         0x95A5A6,
+    "Skinning":       0xD35400,
+    "Tailoring":      0x1ABC9C,
+    "Cooking":        0xE74C3C,
+    "First Aid":      0xECF0F1,
+    "Fishing":        0x2980B9,
+}
+
+# ── DB URL Parser ──────────────────────────────────────────────
 def parse_db_url(url: str) -> dict:
-    import re
     m = re.match(r"postgres(?:ql)?://([^:]+):([^@]+)@([^:/]+)(?::(\d+))?/(.+)", url)
     if not m:
         raise ValueError("Could not parse DATABASE_URL")
@@ -25,13 +48,6 @@ def parse_db_url(url: str) -> dict:
         "database": database,
         "ssl":      "require",
     }
-
-# TBC Professions
-PROFESSIONS = [
-    "Alchemy", "Blacksmithing", "Enchanting", "Engineering",
-    "Herbalism", "Jewelcrafting", "Leatherworking", "Mining",
-    "Skinning", "Tailoring", "Cooking", "First Aid", "Fishing"
-]
 
 # ── Database Setup ─────────────────────────────────────────────
 async def init_db(pool: asyncpg.Pool):
@@ -59,7 +75,79 @@ async def init_db(pool: asyncpg.Pool):
                 recipe_name   TEXT NOT NULL,
                 notes         TEXT DEFAULT ''
             );
+
+            CREATE TABLE IF NOT EXISTS live_embeds (
+                profession    TEXT PRIMARY KEY,
+                channel_id    TEXT NOT NULL,
+                message_id    TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS cooldowns (
+                id            SERIAL PRIMARY KEY,
+                discord_id    TEXT NOT NULL REFERENCES members(discord_id) ON DELETE CASCADE,
+                recipe_name   TEXT NOT NULL,
+                profession    TEXT NOT NULL,
+                ready_at      TIMESTAMPTZ NOT NULL,
+                notified      BOOLEAN DEFAULT FALSE,
+                UNIQUE(discord_id, recipe_name)
+            );
         """)
+
+# ── Live Embed Builder ─────────────────────────────────────────
+async def build_profession_embed(pool: asyncpg.Pool, profession: str) -> discord.Embed:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT m.char_name, r.recipe_name, r.notes
+            FROM recipes r
+            JOIN members m ON r.discord_id = m.discord_id
+            WHERE r.profession = $1
+            ORDER BY r.recipe_name, m.char_name
+        """, profession)
+
+    color = PROFESSION_COLORS.get(profession, 0xF4A92A)
+    embed = discord.Embed(
+        title=f"📚 {profession} — Guild Recipes",
+        color=color,
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    if not rows:
+        embed.description = "*No recipes registered yet. Use `/add_recipe` to add some!*"
+    else:
+        recipe_map = {}
+        for row in rows:
+            entry = row['char_name'] + (f" *({row['notes']})*" if row['notes'] else "")
+            recipe_map.setdefault(row['recipe_name'], []).append(entry)
+
+        lines = [f"**{r}** — {', '.join(c)}" for r, c in sorted(recipe_map.items())]
+        # Discord embed description limit is 4096 chars; truncate gracefully
+        description = "\n".join(lines)
+        if len(description) > 4000:
+            description = description[:4000] + "\n*...use /list_recipes to see all*"
+        embed.description = description
+        embed.set_footer(text=f"{len(recipe_map)} recipe(s) • Last updated")
+
+    return embed
+
+async def refresh_live_embed(pool: asyncpg.Pool, bot: commands.Bot, profession: str):
+    """Fetch the stored message for this profession and edit it with fresh data."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT channel_id, message_id FROM live_embeds WHERE profession = $1", profession
+        )
+    if not row:
+        return
+    try:
+        channel = bot.get_channel(int(row['channel_id']))
+        if not channel:
+            return
+        message = await channel.fetch_message(int(row['message_id']))
+        embed = await build_profession_embed(pool, profession)
+        await message.edit(embed=embed)
+    except (discord.NotFound, discord.Forbidden):
+        # Message was deleted or bot lost permissions — clean up the DB entry
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM live_embeds WHERE profession = $1", profession)
 
 # ── Bot Setup ──────────────────────────────────────────────────
 intents = discord.Intents.default()
@@ -74,6 +162,8 @@ class GuildBot(commands.Bot):
         self.pool = await asyncpg.create_pool(**parse_db_url(DATABASE_URL))
         await init_db(self.pool)
         await self.tree.sync()
+        # Start background cooldown checker
+        self.loop.create_task(cooldown_checker(self))
         print("✅ Database connected and slash commands synced.")
 
     async def on_ready(self):
@@ -87,6 +177,39 @@ class GuildBot(commands.Bot):
 
 bot = GuildBot()
 
+# ── Background: Cooldown Checker ──────────────────────────────
+import asyncio
+
+async def cooldown_checker(bot: GuildBot):
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            async with bot.pool.acquire() as conn:
+                due = await conn.fetch("""
+                    SELECT c.id, c.discord_id, c.recipe_name, c.profession, m.char_name
+                    FROM cooldowns c
+                    JOIN members m ON c.discord_id = m.discord_id
+                    WHERE c.ready_at <= NOW() AND c.notified = FALSE
+                """)
+                for row in due:
+                    user = bot.get_user(int(row['discord_id']))
+                    if user:
+                        try:
+                            embed = discord.Embed(
+                                title="⏰ Cooldown Ready!",
+                                description=f"**{row['char_name']}** — your **{row['recipe_name']}** ({row['profession']}) cooldown is ready to use!",
+                                color=0x2ECC71
+                            )
+                            await user.send(embed=embed)
+                        except discord.Forbidden:
+                            pass  # User has DMs disabled
+                    await conn.execute(
+                        "UPDATE cooldowns SET notified = TRUE WHERE id = $1", row['id']
+                    )
+        except Exception as e:
+            print(f"Cooldown checker error: {e}")
+        await asyncio.sleep(60)  # Check every minute
+
 # ── Autocomplete Helpers ───────────────────────────────────────
 async def profession_autocomplete(interaction: discord.Interaction, current: str):
     return [
@@ -96,10 +219,7 @@ async def profession_autocomplete(interaction: discord.Interaction, current: str
 
 # ── /register ─────────────────────────────────────────────────
 @bot.tree.command(name="register", description="Register your WoW character with the guild bot")
-@app_commands.describe(
-    char_name="Your WoW character name",
-    realm="Your realm name (default: Unknown)"
-)
+@app_commands.describe(char_name="Your WoW character name", realm="Your realm name")
 async def register(interaction: discord.Interaction, char_name: str, realm: str = "Unknown"):
     async with bot.pool.acquire() as conn:
         await conn.execute("""
@@ -121,10 +241,7 @@ async def register(interaction: discord.Interaction, char_name: str, realm: str 
 
 # ── /add_profession ────────────────────────────────────────────
 @bot.tree.command(name="add_profession", description="Add or update a profession for your character")
-@app_commands.describe(
-    profession="Your profession",
-    skill_level="Your current skill level (1-375)"
-)
+@app_commands.describe(profession="Your profession", skill_level="Your current skill level (1-375)")
 @app_commands.autocomplete(profession=profession_autocomplete)
 async def add_profession(interaction: discord.Interaction, profession: str, skill_level: int = 0):
     async with bot.pool.acquire() as conn:
@@ -133,7 +250,7 @@ async def add_profession(interaction: discord.Interaction, profession: str, skil
             await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
             return
         if profession not in PROFESSIONS:
-            await interaction.response.send_message(f"❌ Unknown profession. Valid: {', '.join(PROFESSIONS)}", ephemeral=True)
+            await interaction.response.send_message(f"❌ Unknown profession.", ephemeral=True)
             return
         await conn.execute("""
             INSERT INTO professions (discord_id, profession, skill_level)
@@ -182,12 +299,17 @@ async def add_recipe(interaction: discord.Interaction, profession: str, recipe_n
     if notes:
         embed.add_field(name="Notes", value=notes)
     await interaction.response.send_message(embed=embed)
+    await refresh_live_embed(bot.pool, bot, profession)
 
 # ── /remove_recipe ─────────────────────────────────────────────
 @bot.tree.command(name="remove_recipe", description="Remove a recipe from your list")
 @app_commands.describe(recipe_name="Name of the recipe to remove")
 async def remove_recipe(interaction: discord.Interaction, recipe_name: str):
     async with bot.pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT profession FROM recipes
+            WHERE discord_id = $1 AND LOWER(recipe_name) = LOWER($2)
+        """, str(interaction.user.id), recipe_name)
         result = await conn.execute("""
             DELETE FROM recipes
             WHERE discord_id = $1 AND LOWER(recipe_name) = LOWER($2)
@@ -195,9 +317,175 @@ async def remove_recipe(interaction: discord.Interaction, recipe_name: str):
 
     deleted = int(result.split(" ")[-1])
     if deleted == 0:
-        await interaction.response.send_message(f"❌ No recipe named **{recipe_name}** found on your character.", ephemeral=True)
+        await interaction.response.send_message(f"❌ No recipe named **{recipe_name}** found.", ephemeral=True)
     else:
         await interaction.response.send_message(f"🗑️ Removed **{recipe_name}** from your recipes.")
+        if row:
+            await refresh_live_embed(bot.pool, bot, row['profession'])
+
+# ── /update_recipe ─────────────────────────────────────────────
+@bot.tree.command(name="update_recipe", description="Update the notes on one of your recipes")
+@app_commands.describe(recipe_name="Name of the recipe to update", notes="New notes")
+async def update_recipe(interaction: discord.Interaction, recipe_name: str, notes: str):
+    async with bot.pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE recipes SET notes = $3
+            WHERE discord_id = $1 AND LOWER(recipe_name) = LOWER($2)
+            RETURNING profession, recipe_name
+        """, str(interaction.user.id), recipe_name, notes)
+
+    if not row:
+        await interaction.response.send_message(f"❌ No recipe named **{recipe_name}** found.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"✏️ Updated **{row['recipe_name']}** notes to: *{notes}*")
+        await refresh_live_embed(bot.pool, bot, row['profession'])
+
+# ── /setup_live ────────────────────────────────────────────────
+@bot.tree.command(name="setup_live", description="Post a live-updating recipe embed for a profession in this channel")
+@app_commands.describe(profession="The profession to create a live embed for")
+@app_commands.autocomplete(profession=profession_autocomplete)
+@app_commands.checks.has_permissions(manage_channels=True)
+async def setup_live(interaction: discord.Interaction, profession: str):
+    if profession not in PROFESSIONS:
+        await interaction.response.send_message("❌ Unknown profession.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    embed = await build_profession_embed(bot.pool, profession)
+    message = await interaction.channel.send(embed=embed)
+
+    async with bot.pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO live_embeds (profession, channel_id, message_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (profession) DO UPDATE
+              SET channel_id = EXCLUDED.channel_id,
+                  message_id = EXCLUDED.message_id
+        """, profession, str(interaction.channel.id), str(message.id))
+
+    await interaction.followup.send(
+        f"✅ Live **{profession}** embed posted! It will auto-update whenever recipes are added or removed.",
+        ephemeral=True
+    )
+
+# ── /set_cooldown ──────────────────────────────────────────────
+@bot.tree.command(name="set_cooldown", description="Start a cooldown timer — bot will DM you when it's ready")
+@app_commands.describe(
+    recipe_name="The recipe with a cooldown (e.g. Primal Mooncloth)",
+    profession="The profession this belongs to",
+    hours="Cooldown duration in hours (e.g. 96 for 4 days)"
+)
+@app_commands.autocomplete(profession=profession_autocomplete)
+async def set_cooldown(interaction: discord.Interaction, recipe_name: str, profession: str, hours: int):
+    async with bot.pool.acquire() as conn:
+        member = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(interaction.user.id))
+        if not member:
+            await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
+            return
+
+        ready_at = datetime.now(timezone.utc) + timedelta(hours=hours)
+        await conn.execute("""
+            INSERT INTO cooldowns (discord_id, recipe_name, profession, ready_at, notified)
+            VALUES ($1, $2, $3, $4, FALSE)
+            ON CONFLICT (discord_id, recipe_name) DO UPDATE
+              SET ready_at = EXCLUDED.ready_at, notified = FALSE
+        """, str(interaction.user.id), recipe_name, profession, ready_at)
+
+    days = hours // 24
+    remaining_hours = hours % 24
+    duration_str = f"{days}d {remaining_hours}h" if days else f"{hours}h"
+    ready_ts = int(ready_at.timestamp())
+
+    embed = discord.Embed(
+        title="⏱️ Cooldown Started",
+        description=(
+            f"**{member['char_name']}** — **{recipe_name}** ({profession})\n"
+            f"Duration: **{duration_str}**\n"
+            f"Ready: <t:{ready_ts}:F> (<t:{ready_ts}:R>)\n\n"
+            f"I'll DM you when it's ready!"
+        ),
+        color=0xF4A92A
+    )
+    await interaction.response.send_message(embed=embed)
+
+# ── /my_cooldowns ──────────────────────────────────────────────
+@bot.tree.command(name="my_cooldowns", description="Check your active cooldown timers")
+async def my_cooldowns(interaction: discord.Interaction):
+    async with bot.pool.acquire() as conn:
+        member = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(interaction.user.id))
+        if not member:
+            await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
+            return
+        rows = await conn.fetch("""
+            SELECT recipe_name, profession, ready_at, notified
+            FROM cooldowns
+            WHERE discord_id = $1
+            ORDER BY ready_at ASC
+        """, str(interaction.user.id))
+
+    embed = discord.Embed(title=f"⏱️ {member['char_name']}'s Cooldowns", color=0xF4A92A)
+    if not rows:
+        embed.description = "No active cooldowns. Use `/set_cooldown` to track one!"
+    else:
+        for row in rows:
+            ready_ts = int(row['ready_at'].timestamp())
+            now = datetime.now(timezone.utc)
+            if row['ready_at'] <= now:
+                status = "✅ **Ready!**"
+            else:
+                status = f"<t:{ready_ts}:R> (ready <t:{ready_ts}:F>)"
+            embed.add_field(
+                name=f"{'✅' if row['notified'] else '⏳'} {row['recipe_name']} ({row['profession']})",
+                value=status,
+                inline=False
+            )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ── /guild_cooldowns ───────────────────────────────────────────
+@bot.tree.command(name="guild_cooldowns", description="See all active cooldowns across the guild")
+async def guild_cooldowns(interaction: discord.Interaction):
+    async with bot.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT m.char_name, c.recipe_name, c.profession, c.ready_at, c.notified
+            FROM cooldowns c
+            JOIN members m ON c.discord_id = m.discord_id
+            ORDER BY c.ready_at ASC
+        """)
+
+    embed = discord.Embed(title="⏱️ Guild Cooldowns", color=0xF4A92A)
+    if not rows:
+        embed.description = "No cooldowns tracked yet. Use `/set_cooldown` to add one!"
+    else:
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            ready_ts = int(row['ready_at'].timestamp())
+            if row['ready_at'] <= now:
+                status = "✅ **Ready!**"
+            else:
+                status = f"<t:{ready_ts}:R>"
+            embed.add_field(
+                name=f"{row['char_name']} — {row['recipe_name']} ({row['profession']})",
+                value=status,
+                inline=False
+            )
+    await interaction.response.send_message(embed=embed)
+
+# ── /clear_cooldown ────────────────────────────────────────────
+@bot.tree.command(name="clear_cooldown", description="Remove a cooldown timer")
+@app_commands.describe(recipe_name="The recipe cooldown to remove")
+async def clear_cooldown(interaction: discord.Interaction, recipe_name: str):
+    async with bot.pool.acquire() as conn:
+        result = await conn.execute("""
+            DELETE FROM cooldowns
+            WHERE discord_id = $1 AND LOWER(recipe_name) = LOWER($2)
+        """, str(interaction.user.id), recipe_name)
+
+    deleted = int(result.split(" ")[-1])
+    if deleted == 0:
+        await interaction.response.send_message(f"❌ No cooldown found for **{recipe_name}**.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"🗑️ Cleared cooldown for **{recipe_name}**.")
 
 # ── /who_can_craft ─────────────────────────────────────────────
 @bot.tree.command(name="who_can_craft", description="Find guild members who know a specific recipe")
@@ -225,39 +513,6 @@ async def who_can_craft(interaction: discord.Interaction, recipe_name: str):
     embed.set_footer(text=f"Found {len(rows)} result(s)")
     await interaction.response.send_message(embed=embed)
 
-# ── /list_recipes ──────────────────────────────────────────────
-@bot.tree.command(name="list_recipes", description="List all guild recipes for a specific profession")
-@app_commands.describe(profession="The profession to list recipes for")
-@app_commands.autocomplete(profession=profession_autocomplete)
-async def list_recipes(interaction: discord.Interaction, profession: str):
-    async with bot.pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT m.char_name, r.recipe_name, r.notes
-            FROM recipes r
-            JOIN members m ON r.discord_id = m.discord_id
-            WHERE r.profession = $1
-            ORDER BY r.recipe_name, m.char_name
-        """, profession)
-
-    if not rows:
-        await interaction.response.send_message(f"❌ No recipes found for **{profession}** in the guild.", ephemeral=True)
-        return
-
-    recipe_map = {}
-    for row in rows:
-        key = row['recipe_name']
-        entry = row['char_name'] + (f" *({row['notes']})*" if row['notes'] else "")
-        recipe_map.setdefault(key, []).append(entry)
-
-    lines = [f"**{r}** — {', '.join(c)}" for r, c in sorted(recipe_map.items())]
-    embed = discord.Embed(title=f"📚 Guild {profession} Recipes", color=0x9B59B6)
-    embed.description = "\n".join(lines[:20])
-    footer = f"{len(lines)} recipe(s) total"
-    if len(lines) > 20:
-        footer = f"Showing 20 of {len(lines)} recipes. Use /who_can_craft to search for more."
-    embed.set_footer(text=footer)
-    await interaction.response.send_message(embed=embed)
-
 # ── /my_recipes ────────────────────────────────────────────────
 @bot.tree.command(name="my_recipes", description="View all your registered recipes")
 async def my_recipes(interaction: discord.Interaction):
@@ -268,8 +523,7 @@ async def my_recipes(interaction: discord.Interaction):
             return
         rows = await conn.fetch("""
             SELECT profession, recipe_name, notes FROM recipes
-            WHERE discord_id = $1
-            ORDER BY profession, recipe_name
+            WHERE discord_id = $1 ORDER BY profession, recipe_name
         """, str(interaction.user.id))
 
     embed = discord.Embed(title=f"📜 {member['char_name']}'s Recipes", color=0x1ABC9C)
@@ -293,7 +547,6 @@ async def guild_roster(interaction: discord.Interaction):
         if not members:
             await interaction.response.send_message("❌ No members registered yet!", ephemeral=True)
             return
-
         embed = discord.Embed(title="⚔️ Guild Roster", color=0xF4A92A)
         for m in members:
             profs = await conn.fetch(
@@ -320,17 +573,35 @@ async def help_cmd(interaction: discord.Interaction):
         description="Track guild recipes and professions for Burning Crusade Anniversary!",
         color=0xF4A92A
     )
-    for cmd, desc in [
-        ("/register", "Register your character with the bot"),
-        ("/add_profession", "Add/update a profession and skill level"),
-        ("/add_recipe", "Add a recipe you know to the guild database"),
-        ("/remove_recipe", "Remove a recipe from your list"),
-        ("/who_can_craft", "Find who can craft a specific item"),
-        ("/list_recipes", "List all guild recipes for a profession"),
-        ("/my_recipes", "View all your registered recipes (private)"),
-        ("/guild_roster", "Show all members and their professions"),
-    ]:
-        embed.add_field(name=cmd, value=desc, inline=False)
+    sections = [
+        ("📋 Registration", [
+            ("/register", "Register your WoW character"),
+            ("/add_profession", "Add/update a profession and skill level"),
+            ("/guild_roster", "Show all members and their professions"),
+        ]),
+        ("📜 Recipes", [
+            ("/add_recipe", "Add a recipe you know"),
+            ("/remove_recipe", "Remove a recipe"),
+            ("/update_recipe", "Update notes on a recipe"),
+            ("/who_can_craft", "Find who can craft a specific item"),
+            ("/my_recipes", "View your own recipes (private)"),
+        ]),
+        ("📺 Live Embeds", [
+            ("/setup_live", "Post a live-updating recipe board in a channel (officers only)"),
+        ]),
+        ("⏱️ Cooldowns", [
+            ("/set_cooldown", "Start a cooldown timer — get DM'd when ready"),
+            ("/my_cooldowns", "View your active cooldowns (private)"),
+            ("/guild_cooldowns", "See all guild cooldowns"),
+            ("/clear_cooldown", "Remove a cooldown timer"),
+        ]),
+    ]
+    for section, cmds in sections:
+        embed.add_field(
+            name=section,
+            value="\n".join(f"`{cmd}` — {desc}" for cmd, desc in cmds),
+            inline=False
+        )
     embed.set_footer(text="For Azeroth! 🏰")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
