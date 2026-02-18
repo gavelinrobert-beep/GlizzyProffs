@@ -34,6 +34,150 @@ PROFESSION_COLORS = {
     "Fishing":        0x2980B9,
 }
 
+
+# ── Notable TBC Recipes by Profession ─────────────────────────
+TBC_RECIPES = {
+    "Alchemy": [
+        "Flask of Blinding Light", "Flask of Chromatic Wonder", "Flask of Fortification",
+        "Flask of Mighty Restoration", "Flask of Pure Death", "Flask of Relentless Assault",
+        "Flask of Supreme Power", "Flask of the Titans",
+        "Elixir of Major Agility", "Elixir of Major Firepower", "Elixir of Major Fortitude",
+        "Elixir of Major Frost Power", "Elixir of Major Mageblood", "Elixir of Major Shadow Power",
+        "Elixir of Major Strength", "Elixir of Mastery", "Elixir of the Draenei",
+        "Elixir of Empowerment", "Elixir of Healing Power",
+        "Super Mana Potion", "Super Healing Potion", "Haste Potion", "Destruction Potion",
+        "Ironshield Potion", "Fel Mana Potion",
+        "Transmute: Primal Air to Fire", "Transmute: Primal Earth to Life",
+        "Transmute: Primal Earth to Water", "Transmute: Primal Fire to Earth",
+        "Transmute: Primal Shadow to Water", "Transmute: Primal Water to Air",
+        "Transmute: Primal Life to Earth", "Transmute: Skyfire Diamond",
+        "Transmute: Earthstorm Diamond",
+    ],
+    "Blacksmithing": [
+        "Boots of the Resilient", "Bracers of the Green Fortress", "Bulwark of the Ancient Kings",
+        "Cobra-Lash Boots", "Crossbow of Relentless Strikes", "Eternium Runed Blade",
+        "Felsteel Longblade", "Flamebane Bracers", "Gauntlets of the Iron Tower",
+        "Greater Rune of Warding", "Hand of Eternity", "Iceguard Breastplate",
+        "Iceguard Gauntlets", "Iceguard Helm", "Khorium Champion",
+        "Khorium Destroyer", "Lesser Ward of Shielding", "Lighter Eternium Rod",
+        "Lunar Crescent", "Mooncleaver", "Oathkeeper", "Ragesteel Breastplate",
+        "Ragesteel Gloves", "Ragesteel Helm", "Ragesteel Shoulders",
+        "Shadesteel Bracers", "Shadesteel Greaves", "Shadesteel Sabots", "Shadesteel Shoulders",
+        "Shuriken of Negation", "Storm Helm", "Stormherald",
+        "Twisting Nether Chain Shirt", "Wicked Edge of the Planes",
+    ],
+    "Enchanting": [
+        "Enchant Boots - Dexterity", "Enchant Boots - Fortitude", "Enchant Boots - Surefooted",
+        "Enchant Bracer - Spellpower", "Enchant Bracer - Stats", "Enchant Bracer - Fortitude",
+        "Enchant Chest - Exceptional Health", "Enchant Chest - Exceptional Mana",
+        "Enchant Chest - Exceptional Stats",
+        "Enchant Cloak - Greater Agility", "Enchant Cloak - Spell Penetration",
+        "Enchant Gloves - Major Healing", "Enchant Gloves - Major Spellpower",
+        "Enchant Gloves - Superior Agility", "Enchant Gloves - Threat",
+        "Enchant Ring - Healing Power", "Enchant Ring - Spellpower", "Enchant Ring - Stats",
+        "Enchant Shield - Major Stamina", "Enchant Shield - Resilience",
+        "Enchant Weapon - Major Healing", "Enchant Weapon - Major Spellpower",
+        "Enchant Weapon - Mongoose", "Enchant Weapon - Soulfrost",
+        "Enchant Weapon - Spellsurge", "Enchant Weapon - Sunfire",
+        "Enchant 2H Weapon - Major Agility", "Enchant Weapon - Greater Agility",
+        "Enchant Weapon - Executioner",
+    ],
+    "Engineering": [
+        "Adamantite Scope", "Deathblow X11 Goggles", "Destroyer Protoshield",
+        "Ebon Netherscale Breastplate", "Gnomish Poultryizer", "Gnomish Power Goggles",
+        "Goblin Rocket Launcher", "Hyper-Vision Goggles", "Justicar X1 Multi-Target Mortar",
+        "Khorium Scope", "Quad Deathblow X44 Goggles", "Rocket Boots Xtreme",
+        "Rocket Boots Xtreme Lite", "Stabilized Eternium Scope", "Steam-Powered Goggles",
+        "Surestrike Goggles v2.0", "Surestrike Goggles v3.0",
+        "Tankatronic Goggles", "Wonderheal XT68 Shades",
+    ],
+    "Jewelcrafting": [
+        "Bold Living Ruby", "Brilliant Dawnstone", "Delicate Living Ruby",
+        "Durable Talasite", "Enduring Talasite", "Flashing Living Ruby",
+        "Forceful Talasite", "Gleaming Dawnstone", "Glinting Noble Topaz",
+        "Glowing Nightseye", "Inscribed Noble Topaz", "Jagged Talasite",
+        "Lustrous Star of Elune", "Mystic Dawnstone", "Potent Noble Topaz",
+        "Quick Dawnstone", "Radiant Talasite", "Reckless Noble Topaz",
+        "Rigid Star of Elune", "Royal Nightseye", "Runed Living Ruby",
+        "Smooth Dawnstone", "Solid Star of Elune", "Sovereign Nightseye",
+        "Sparkling Star of Elune", "Stormy Star of Elune", "Subtle Dawnstone",
+        "Swift Windfire Diamond", "Tenacious Earthstorm Diamond",
+        "Thundering Skyfire Diamond", "Veiled Noble Topaz",
+    ],
+    "Leatherworking": [
+        "Bindings of the Wildheart", "Blue Dragonscale Breastplate",
+        "Boots of Natural Grace", "Boots of Utter Darkness", "Boots of the Crimson Hawk",
+        "Bracers of Renewed Life", "Cobrascale Gloves", "Cobrascale Hood",
+        "Drums of Battle", "Drums of Panic", "Drums of Restoration", "Drums of Speed",
+        "Ebon Netherscale Belt", "Ebon Netherscale Bracers",
+        "Fel Leather Gloves", "Fel Leather Leggings", "Fel Leather Boots",
+        "Felstalker Belt", "Felstalker Breastplate", "Felstalker Bracers",
+        "Living Earth Bindings", "Living Earth Shoulders",
+        "Netherdrake Gloves", "Netherdrake Helm",
+        "Primalstrike Belt", "Primalstrike Bracers", "Primalstrike Vest",
+        "Stylin Crimson Hat", "Stylin Jungle Hat", "Stylin Purple Hat",
+        "Thick Draenic Vest", "Windhawk Armor", "Windhawk Belt", "Windhawk Bracers",
+        "Windscale Hood",
+    ],
+    "Tailoring": [
+        "Battlecast Hood", "Battlecast Pants", "Blackout Bindings",
+        "Blackstrike Bracers", "Cloak of Arcane Evasion", "Cloak of Darkness",
+        "Cloak of the Black Void", "Cloak of Eternity",
+        "Frozen Shadoweave Boots", "Frozen Shadoweave Robe", "Frozen Shadoweave Shoulders",
+        "Girdle of Ruination", "Primal Mooncloth", "Primal Mooncloth Bag",
+        "Primal Mooncloth Belt", "Primal Mooncloth Gloves", "Primal Mooncloth Robe",
+        "Primal Mooncloth Shoulders", "Runic Spellthread", "Silver Spellthread",
+        "Shadowcloth", "Spellstrike Hood", "Spellstrike Pants",
+        "Soulcloth Gloves", "Soulcloth Shoulders", "Soulcloth Vest",
+        "Unyielding Girdle", "Unyielding Pants", "Whitemend Hood",
+        "Whitemend Pants", "Windchannel Gloves",
+    ],
+    "Cooking": [
+        "Blackened Basilisk", "Blackened Sporefish", "Buzzard Bites",
+        "Crunchy Serpent", "Feltail Delight", "Fisherman Feast",
+        "Golden Fish Sticks", "Grilled Mudfish", "Horrible Oily Sausage",
+        "Lynx Steak", "Mok Nathal Shortribs", "Ravager Dog",
+        "Roasted Clefthoof", "Skulfish Surprise", "Spicy Crawdad",
+        "Sporefish Surprise", "Stewed Trout", "Talbuk Steak",
+        "Warp Burger",
+    ],
+    "First Aid": [
+        "Heavy Netherweave Bandage", "Netherweave Bandage",
+    ],
+    "Fishing": [
+        "Furious Crawdad", "Mote of Water", "Enormous Barbed Gill Trout",
+    ],
+    "Herbalism": [],
+    "Mining": [],
+    "Skinning": [],
+    "Engineering": [
+        "Adamantite Scope", "Deathblow X11 Goggles", "Destroyer Protoshield",
+        "Gnomish Poultryizer", "Goblin Rocket Launcher", "Hyper-Vision Goggles",
+        "Khorium Scope", "Quad Deathblow X44 Goggles", "Rocket Boots Xtreme",
+        "Rocket Boots Xtreme Lite", "Stabilized Eternium Scope",
+        "Surestrike Goggles v2.0", "Surestrike Goggles v3.0",
+        "Tankatronic Goggles", "Wonderheal XT68 Shades",
+    ],
+}
+
+async def recipe_name_autocomplete(interaction: discord.Interaction, current: str):
+    # Get the profession from the interaction options if available
+    profession = None
+    if interaction.data and "options" in interaction.data:
+        for opt in interaction.data["options"]:
+            if opt["name"] == "profession":
+                profession = opt.get("value")
+                break
+    
+    if profession and profession in TBC_RECIPES:
+        recipes = TBC_RECIPES[profession]
+    else:
+        # Show all recipes across all professions
+        recipes = [r for rlist in TBC_RECIPES.values() for r in rlist]
+    
+    matches = [r for r in recipes if current.lower() in r.lower()][:25]
+    return [app_commands.Choice(name=r, value=r) for r in sorted(matches)]
+
 # ── DB URL Parser ──────────────────────────────────────────────
 def parse_db_url(url: str) -> dict:
     m = re.match(r"postgres(?:ql)?://([^:]+):([^@]+)@([^:/]+)(?::(\d+))?/(.+)", url)
@@ -273,7 +417,7 @@ async def register(interaction: discord.Interaction, char_name: str, realm: str 
         color=0xF4A92A
     )
     embed.set_footer(text="Use /add_profession to add your professions.")
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ── /register_member (officer) ─────────────────────────────────
@@ -301,7 +445,7 @@ async def register_member(interaction: discord.Interaction, member: discord.Memb
         color=0xF4A92A
     )
     embed.set_footer(text=f"Registered by {interaction.user.display_name}")
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ── /add_profession ────────────────────────────────────────────
 @bot.tree.command(name="add_profession", description="Add or update a profession for your character")
@@ -327,7 +471,7 @@ async def add_profession(interaction: discord.Interaction, profession: str, skil
         description=f"**{member['char_name']}** — {profession} ({skill_level}/375)",
         color=0x3A9BD5
     )
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ── /add_recipe ────────────────────────────────────────────────
 @bot.tree.command(name="add_recipe", description="Add a recipe you know to the guild database")
@@ -336,7 +480,7 @@ async def add_profession(interaction: discord.Interaction, profession: str, skil
     recipe_name="Name of the recipe (e.g. Primal Mooncloth Bag)",
     notes="Optional notes (e.g. 'cooldown 4 days', 'need mats')"
 )
-@app_commands.autocomplete(profession=profession_autocomplete)
+@app_commands.autocomplete(profession=profession_autocomplete, recipe_name=recipe_name_autocomplete)
 async def add_recipe(interaction: discord.Interaction, profession: str, recipe_name: str, notes: str = ""):
     async with bot.pool.acquire() as conn:
         member = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(interaction.user.id))
@@ -362,7 +506,7 @@ async def add_recipe(interaction: discord.Interaction, profession: str, recipe_n
     )
     if notes:
         embed.add_field(name="Notes", value=notes)
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
     await refresh_live_embed(bot.pool, bot, profession)
 
 
@@ -374,7 +518,7 @@ async def add_recipe(interaction: discord.Interaction, profession: str, recipe_n
     recipe_name="Name of the recipe",
     notes="Optional notes (e.g. 'cooldown 4 days')"
 )
-@app_commands.autocomplete(profession=profession_autocomplete)
+@app_commands.autocomplete(profession=profession_autocomplete, recipe_name=recipe_name_autocomplete)
 @app_commands.checks.has_permissions(manage_roles=True)
 async def add_recipe_for(interaction: discord.Interaction, member: discord.Member, profession: str, recipe_name: str, notes: str = ""):
     async with bot.pool.acquire() as conn:
@@ -402,7 +546,7 @@ async def add_recipe_for(interaction: discord.Interaction, member: discord.Membe
     if notes:
         embed.add_field(name="Notes", value=notes)
     embed.set_footer(text=f"Added by {interaction.user.display_name}")
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
     await refresh_live_embed(bot.pool, bot, profession)
 
 # ── /remove_recipe ─────────────────────────────────────────────
