@@ -637,6 +637,114 @@ async def add_recipes_bulk(interaction: discord.Interaction, profession: str, me
 
     await interaction.response.send_modal(BulkRecipeModal(profession, target_id, target_name, added_by))
 
+
+# ── /import_recipes ────────────────────────────────────────────
+class ImportRecipesModal(discord.ui.Modal, title="Import Recipes from Text"):
+    text = discord.ui.TextInput(
+        label="Paste any text containing recipe names",
+        style=discord.TextStyle.paragraph,
+        placeholder="e.g. I have Flask of Supreme Power, Elixir of Major Agility, Primal Mooncloth Bag...",
+        required=True,
+        max_length=2000
+    )
+
+    def __init__(self, profession: str, target_id: str, target_name: str, added_by: str = None):
+        super().__init__()
+        self.profession = profession
+        self.target_id = target_id
+        self.target_name = target_name
+        self.added_by = added_by
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.text.value
+
+        # Match against known recipes for this profession (case-insensitive)
+        known = TBC_RECIPES.get(self.profession, [])
+        matched = [r for r in known if r.lower() in raw.lower()]
+
+        if not matched:
+            await interaction.response.send_message(
+                f"❌ No known **{self.profession}** recipes found in that text.\n"
+                f"Try `/add_recipes_bulk` to add recipes manually by name.",
+                ephemeral=True
+            )
+            return
+
+        added = []
+        skipped = []
+        async with bot.pool.acquire() as conn:
+            for recipe_name in matched:
+                existing = await conn.fetchrow("""
+                    SELECT id FROM recipes
+                    WHERE discord_id = $1 AND profession = $2 AND LOWER(recipe_name) = LOWER($3)
+                """, self.target_id, self.profession, recipe_name)
+                if existing:
+                    skipped.append(recipe_name)
+                else:
+                    await conn.execute("""
+                        INSERT INTO recipes (discord_id, profession, recipe_name, notes)
+                        VALUES ($1, $2, $3, '')
+                    """, self.target_id, self.profession, recipe_name)
+                    added.append(recipe_name)
+
+        lines_out = []
+        if added:
+            lines_out.append(f"✅ Added **{len(added)}** recipe(s) for **{self.target_name}** ({self.profession}):")
+            lines_out += [f"• {r}" for r in added]
+        if skipped:
+            lines_out.append(f"⚠️ Skipped **{len(skipped)}** already existing:")
+            lines_out += [f"• {r}" for r in skipped]
+        if self.added_by:
+            lines_out.append(f"\n*Imported by {self.added_by}*")
+
+        await interaction.response.send_message("\n".join(lines_out), ephemeral=True)
+
+        if added:
+            await refresh_live_embed(bot.pool, bot, self.profession)
+
+
+@bot.tree.command(name="import_recipes", description="Paste any text and the bot will find and add matching recipes")
+@app_commands.describe(
+    profession="The profession to import recipes for",
+    member="The member to import for (officers only — leave empty for yourself)"
+)
+@app_commands.autocomplete(profession=profession_autocomplete)
+async def import_recipes(interaction: discord.Interaction, profession: str, member: discord.Member = None):
+    if profession not in PROFESSIONS:
+        await interaction.response.send_message("❌ Unknown profession.", ephemeral=True)
+        return
+
+    if not TBC_RECIPES.get(profession):
+        await interaction.response.send_message(
+            f"❌ No recipe list available for **{profession}** — use `/add_recipes_bulk` instead.",
+            ephemeral=True
+        )
+        return
+
+    if member and member.id != interaction.user.id:
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ Only officers can import recipes for other members.", ephemeral=True)
+            return
+        async with bot.pool.acquire() as conn:
+            target = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(member.id))
+        if not target:
+            await interaction.response.send_message(f"❌ {member.mention} isn't registered yet!", ephemeral=True)
+            return
+        target_id = str(member.id)
+        target_name = target["char_name"]
+        added_by = interaction.user.display_name
+    else:
+        async with bot.pool.acquire() as conn:
+            target = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(interaction.user.id))
+        if not target:
+            await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
+            return
+        target_id = str(interaction.user.id)
+        target_name = target["char_name"]
+        added_by = None
+
+    await interaction.response.send_modal(ImportRecipesModal(profession, target_id, target_name, added_by))
+
 # ── /remove_recipe ─────────────────────────────────────────────
 @bot.tree.command(name="remove_recipe", description="Remove a recipe from your list")
 @app_commands.describe(recipe_name="Name of the recipe to remove")
@@ -920,6 +1028,7 @@ async def help_cmd(interaction: discord.Interaction):
         ("📜 Recipes", [
             ("/add_recipe", "Add a single recipe"),
             ("/add_recipes_bulk", "Add multiple recipes at once via popup"),
+            ("/import_recipes", "Paste any text and bot finds matching recipes"),
             ("/add_recipe_for", "Add a recipe for another member (officers only)"),
             ("/remove_recipe", "Remove a recipe"),
             ("/update_recipe", "Update notes on a recipe"),
