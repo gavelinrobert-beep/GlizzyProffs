@@ -931,6 +931,112 @@ async def clear_cooldown(interaction: discord.Interaction, recipe_name: str):
     else:
         await interaction.response.send_message(f"🗑️ Cleared cooldown for **{recipe_name}**.")
 
+
+# ── /remove_recipe_for (officer) ──────────────────────────────
+@bot.tree.command(name="remove_recipe_for", description="Remove a recipe from another member (officers only)")
+@app_commands.describe(
+    member="The member to remove the recipe from",
+    recipe_name="Name of the recipe to remove"
+)
+@app_commands.checks.has_permissions(manage_roles=True)
+async def remove_recipe_for(interaction: discord.Interaction, member: discord.Member, recipe_name: str):
+    async with bot.pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(member.id))
+        if not target:
+            await interaction.response.send_message(f"❌ {member.mention} isn't registered.", ephemeral=True)
+            return
+        row = await conn.fetchrow("""
+            SELECT profession FROM recipes
+            WHERE discord_id = $1 AND LOWER(recipe_name) = LOWER($2)
+        """, str(member.id), recipe_name)
+        result = await conn.execute("""
+            DELETE FROM recipes
+            WHERE discord_id = $1 AND LOWER(recipe_name) = LOWER($2)
+        """, str(member.id), recipe_name)
+
+    deleted = int(result.split(" ")[-1])
+    if deleted == 0:
+        await interaction.response.send_message(
+            f"❌ No recipe named **{recipe_name}** found on **{target['char_name']}**.", ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"🗑️ Removed **{recipe_name}** from **{target['char_name']}**.", ephemeral=True
+        )
+        if row:
+            await refresh_live_embed(bot.pool, bot, row['profession'])
+
+
+# ── /clear_member (officer) ────────────────────────────────────
+@bot.tree.command(name="clear_member", description="Remove a member and all their data from the bot (officers only)")
+@app_commands.describe(member="The member to remove")
+@app_commands.checks.has_permissions(manage_roles=True)
+async def clear_member(interaction: discord.Interaction, member: discord.Member):
+    async with bot.pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(member.id))
+        if not target:
+            await interaction.response.send_message(f"❌ {member.mention} isn't registered.", ephemeral=True)
+            return
+
+        # Grab their professions so we can refresh live embeds after
+        profs = await conn.fetch(
+            "SELECT DISTINCT profession FROM recipes WHERE discord_id = $1", str(member.id)
+        )
+        # CASCADE delete handles professions, recipes, cooldowns, bank_requests
+        await conn.execute("DELETE FROM members WHERE discord_id = $1", str(member.id))
+
+    await interaction.response.send_message(
+        f"🗑️ **{target['char_name']}** and all their data has been removed.", ephemeral=True
+    )
+    for row in profs:
+        await refresh_live_embed(bot.pool, bot, row['profession'])
+
+
+# ── /search_member ─────────────────────────────────────────────
+@bot.tree.command(name="search_member", description="Look up everything a specific member can craft")
+@app_commands.describe(member="The member to look up")
+async def search_member(interaction: discord.Interaction, member: discord.Member):
+    async with bot.pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(member.id))
+        if not target:
+            await interaction.response.send_message(f"❌ {member.mention} isn't registered.", ephemeral=True)
+            return
+        rows = await conn.fetch("""
+            SELECT profession, recipe_name, notes FROM recipes
+            WHERE discord_id = $1
+            ORDER BY profession, recipe_name
+        """, str(member.id))
+        profs = await conn.fetch("""
+            SELECT profession, skill_level FROM professions
+            WHERE discord_id = $1 ORDER BY profession
+        """, str(member.id))
+
+    embed = discord.Embed(
+        title=f"🧙 {target['char_name']}",
+        description=f"{member.mention}",
+        color=0xF4A92A
+    )
+
+    if profs:
+        embed.add_field(
+            name="⚒️ Professions",
+            value=", ".join(f"{p['profession']} ({p['skill_level']})" for p in profs),
+            inline=False
+        )
+
+    if not rows:
+        embed.add_field(name="📜 Recipes", value="*No recipes registered yet.*", inline=False)
+    else:
+        prof_map = {}
+        for row in rows:
+            entry = row['recipe_name'] + (f" *({row['notes']})*" if row['notes'] else "")
+            prof_map.setdefault(row['profession'], []).append(entry)
+        for prof, rlist in sorted(prof_map.items()):
+            embed.add_field(name=f"📜 {prof}", value="\n".join(rlist), inline=False)
+        embed.set_footer(text=f"{len(rows)} recipe(s) total")
+
+    await interaction.response.send_message(embed=embed)
+
 # ── /who_can_craft ─────────────────────────────────────────────
 @bot.tree.command(name="who_can_craft", description="Find guild members who know a specific recipe")
 @app_commands.describe(recipe_name="Part of the recipe name to search for")
@@ -1022,14 +1128,17 @@ async def help_cmd(interaction: discord.Interaction):
         ("📋 Registration", [
             ("/register", "Register your own WoW character"),
             ("/register_member", "Link a member\'s character to their Discord (officers only)"),
+            ("/clear_member", "Remove a member and all their data (officers only)"),
             ("/add_profession", "Add/update a profession and skill level"),
             ("/guild_roster", "Show all members and their professions"),
+            ("/search_member", "Look up everything a member can craft"),
         ]),
         ("📜 Recipes", [
             ("/add_recipe", "Add a single recipe"),
             ("/add_recipes_bulk", "Add multiple recipes at once via popup"),
             ("/import_recipes", "Paste any text and bot finds matching recipes"),
             ("/add_recipe_for", "Add a recipe for another member (officers only)"),
+            ("/remove_recipe_for", "Remove a recipe from another member (officers only)"),
             ("/remove_recipe", "Remove a recipe"),
             ("/update_recipe", "Update notes on a recipe"),
             ("/who_can_craft", "Find who can craft a specific item"),
