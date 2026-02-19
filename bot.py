@@ -541,6 +541,102 @@ async def add_recipe_for(interaction: discord.Interaction, member: discord.Membe
     await interaction.response.send_message(embed=embed, ephemeral=True)
     await refresh_live_embed(bot.pool, bot, profession)
 
+
+# ── /add_recipes_bulk ──────────────────────────────────────────
+class BulkRecipeModal(discord.ui.Modal, title="Add Multiple Recipes"):
+    recipes = discord.ui.TextInput(
+        label="Recipes (one per line)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Bold Living Ruby\nRuned Living Ruby\nDelicate Living Ruby\n...",
+        required=True,
+        max_length=1000
+    )
+
+    def __init__(self, profession: str, target_id: str, target_name: str, added_by: str = None):
+        super().__init__()
+        self.profession = profession
+        self.target_id = target_id
+        self.target_name = target_name
+        self.added_by = added_by  # Set if an officer is adding for someone else
+
+    async def on_submit(self, interaction: discord.Interaction):
+        lines = [l.strip() for l in self.recipes.value.splitlines() if l.strip()]
+        if not lines:
+            await interaction.response.send_message("❌ No recipes found — make sure each recipe is on its own line.", ephemeral=True)
+            return
+
+        added = []
+        skipped = []
+        async with bot.pool.acquire() as conn:
+            for recipe_name in lines:
+                existing = await conn.fetchrow("""
+                    SELECT id FROM recipes
+                    WHERE discord_id = $1 AND profession = $2 AND LOWER(recipe_name) = LOWER($3)
+                """, self.target_id, self.profession, recipe_name)
+                if existing:
+                    skipped.append(recipe_name)
+                else:
+                    await conn.execute("""
+                        INSERT INTO recipes (discord_id, profession, recipe_name, notes)
+                        VALUES ($1, $2, $3, '')
+                    """, self.target_id, self.profession, recipe_name)
+                    added.append(recipe_name)
+
+        lines_out = []
+        if added:
+            lines_out.append(f"✅ Added **{len(added)}** recipe(s) for **{self.target_name}** ({self.profession}):")
+            lines_out += [f"• {r}" for r in added]
+        if skipped:
+            lines_out.append(f"⚠️ Skipped **{len(skipped)}** already existing:")
+            lines_out += [f"• {r}" for r in skipped]
+
+        if self.added_by:
+            lines_out.append(f"\n*Added by {self.added_by}*")
+
+        await interaction.response.send_message("\n".join(lines_out), ephemeral=True)
+
+        # Refresh live embed once for this profession
+        if added:
+            await refresh_live_embed(bot.pool, bot, self.profession)
+
+
+@bot.tree.command(name="add_recipes_bulk", description="Add multiple recipes at once via a popup form")
+@app_commands.describe(
+    profession="The profession these recipes belong to",
+    member="The member to add recipes for (officers only — leave empty for yourself)"
+)
+@app_commands.autocomplete(profession=profession_autocomplete)
+async def add_recipes_bulk(interaction: discord.Interaction, profession: str, member: discord.Member = None):
+    if profession not in PROFESSIONS:
+        await interaction.response.send_message("❌ Unknown profession.", ephemeral=True)
+        return
+
+    # If targeting another member, require officer permissions
+    if member and member.id != interaction.user.id:
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ Only officers can add recipes for other members.", ephemeral=True)
+            return
+        async with bot.pool.acquire() as conn:
+            target = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(member.id))
+        if not target:
+            await interaction.response.send_message(f"❌ {member.mention} isn't registered yet! Use `/register_member` first.", ephemeral=True)
+            return
+        target_id = str(member.id)
+        target_name = target["char_name"]
+        added_by = interaction.user.display_name
+    else:
+        # Adding for yourself
+        async with bot.pool.acquire() as conn:
+            target = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(interaction.user.id))
+        if not target:
+            await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
+            return
+        target_id = str(interaction.user.id)
+        target_name = target["char_name"]
+        added_by = None
+
+    await interaction.response.send_modal(BulkRecipeModal(profession, target_id, target_name, added_by))
+
 # ── /remove_recipe ─────────────────────────────────────────────
 @bot.tree.command(name="remove_recipe", description="Remove a recipe from your list")
 @app_commands.describe(recipe_name="Name of the recipe to remove")
@@ -822,7 +918,8 @@ async def help_cmd(interaction: discord.Interaction):
             ("/guild_roster", "Show all members and their professions"),
         ]),
         ("📜 Recipes", [
-            ("/add_recipe", "Add a recipe you know"),
+            ("/add_recipe", "Add a single recipe"),
+            ("/add_recipes_bulk", "Add multiple recipes at once via popup"),
             ("/add_recipe_for", "Add a recipe for another member (officers only)"),
             ("/remove_recipe", "Remove a recipe"),
             ("/update_recipe", "Update notes on a recipe"),
