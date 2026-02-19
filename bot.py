@@ -150,14 +150,6 @@ TBC_RECIPES = {
     "Herbalism": [],
     "Mining": [],
     "Skinning": [],
-    "Engineering": [
-        "Adamantite Scope", "Deathblow X11 Goggles", "Destroyer Protoshield",
-        "Gnomish Poultryizer", "Goblin Rocket Launcher", "Hyper-Vision Goggles",
-        "Khorium Scope", "Quad Deathblow X44 Goggles", "Rocket Boots Xtreme",
-        "Rocket Boots Xtreme Lite", "Stabilized Eternium Scope",
-        "Surestrike Goggles v2.0", "Surestrike Goggles v3.0",
-        "Tankatronic Goggles", "Wonderheal XT68 Shades",
-    ],
 }
 
 async def recipe_name_autocomplete(interaction: discord.Interaction, current: str):
