@@ -382,6 +382,11 @@ async def restore_bank_views(bot: GuildBot):
     bot.add_view(BankRequestView(0))
     print(f"✅ Persistent bank views restored.")
 
+# ── Helpers ───────────────────────────────────────────────────
+def clean_recipe_name(name: str) -> str:
+    """Strip WoW item link brackets e.g. [Brilliant Dawnstone] -> Brilliant Dawnstone"""
+    return name.strip().strip("[]").strip()
+
 # ── Autocomplete Helpers ───────────────────────────────────────
 async def profession_autocomplete(interaction: discord.Interaction, current: str):
     return [
@@ -486,6 +491,7 @@ async def add_recipe(interaction: discord.Interaction, profession: str, recipe_n
         if existing:
             await interaction.response.send_message(f"⚠️ You already have **{recipe_name}** listed!", ephemeral=True)
             return
+        recipe_name = clean_recipe_name(recipe_name)
         await conn.execute("""
             INSERT INTO recipes (discord_id, profession, recipe_name, notes)
             VALUES ($1, $2, $3, $4)
@@ -525,6 +531,7 @@ async def add_recipe_for(interaction: discord.Interaction, member: discord.Membe
         if existing:
             await interaction.response.send_message(f"⚠️ **{target['char_name']}** already has **{recipe_name}** listed!", ephemeral=True)
             return
+        recipe_name = clean_recipe_name(recipe_name)
         await conn.execute("""
             INSERT INTO recipes (discord_id, profession, recipe_name, notes)
             VALUES ($1, $2, $3, $4)
@@ -560,7 +567,7 @@ class BulkRecipeModal(discord.ui.Modal, title="Add Multiple Recipes"):
         self.added_by = added_by  # Set if an officer is adding for someone else
 
     async def on_submit(self, interaction: discord.Interaction):
-        lines = [l.strip() for l in self.recipes.value.splitlines() if l.strip()]
+        lines = [clean_recipe_name(l) for l in self.recipes.value.splitlines() if l.strip()]
         if not lines:
             await interaction.response.send_message("❌ No recipes found — make sure each recipe is on its own line.", ephemeral=True)
             return
@@ -660,7 +667,8 @@ class ImportRecipesModal(discord.ui.Modal, title="Import Recipes from Text"):
 
         # Match against known recipes for this profession (case-insensitive)
         known = TBC_RECIPES.get(self.profession, [])
-        matched = [r for r in known if r.lower() in raw.lower()]
+        raw_clean = clean_recipe_name(raw)
+        matched = [r for r in known if r.lower() in raw.lower() or r.lower() in raw_clean.lower()]
 
         if not matched:
             await interaction.response.send_message(
