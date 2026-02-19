@@ -753,6 +753,99 @@ async def import_recipes(interaction: discord.Interaction, profession: str, memb
 
     await interaction.response.send_modal(ImportRecipesModal(profession, target_id, target_name, added_by))
 
+
+# ── /update_recipes_bulk ───────────────────────────────────────
+class BulkUpdateModal(discord.ui.Modal, title="Update Recipe Notes"):
+    recipes = discord.ui.TextInput(
+        label="Recipe name | New note (one per line)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Flask of Blinding Light | Ctxs specialization\nFlask of Fortification | Ctxs specialization\n...",
+        required=True,
+        max_length=1000
+    )
+
+    def __init__(self, profession: str, target_id: str, target_name: str):
+        super().__init__()
+        self.profession = profession
+        self.target_id = target_id
+        self.target_name = target_name
+
+    async def on_submit(self, interaction: discord.Interaction):
+        lines = [l.strip() for l in self.recipes.value.splitlines() if l.strip()]
+        if not lines:
+            await interaction.response.send_message("❌ No entries found.", ephemeral=True)
+            return
+
+        updated = []
+        not_found = []
+
+        async with bot.pool.acquire() as conn:
+            for line in lines:
+                if "|" not in line:
+                    not_found.append(f"{line} *(missing | separator)*")
+                    continue
+                parts = line.split("|", 1)
+                recipe_name = clean_recipe_name(parts[0])
+                note = parts[1].strip()
+
+                row = await conn.fetchrow("""
+                    UPDATE recipes SET notes = $3
+                    WHERE discord_id = $1 AND LOWER(recipe_name) = LOWER($2)
+                    RETURNING recipe_name
+                """, self.target_id, recipe_name, note)
+
+                if row:
+                    updated.append(f"{row['recipe_name']} → *{note}*")
+                else:
+                    not_found.append(recipe_name)
+
+        lines_out = []
+        if updated:
+            lines_out.append(f"✅ Updated **{len(updated)}** recipe(s) for **{self.target_name}**:")
+            lines_out += [f"• {r}" for r in updated]
+        if not_found:
+            lines_out.append(f"❌ Not found ({len(not_found)}):")
+            lines_out += [f"• {r}" for r in not_found]
+
+        await interaction.response.send_message("\n".join(lines_out), ephemeral=True)
+
+        if updated:
+            await refresh_live_embed(bot.pool, bot, self.profession)
+
+
+@bot.tree.command(name="update_recipes_bulk", description="Update notes on multiple recipes at once via a popup form")
+@app_commands.describe(
+    profession="The profession these recipes belong to",
+    member="The member to update recipes for (officers only — leave empty for yourself)"
+)
+@app_commands.autocomplete(profession=profession_autocomplete)
+async def update_recipes_bulk(interaction: discord.Interaction, profession: str, member: discord.Member = None):
+    if profession not in PROFESSIONS:
+        await interaction.response.send_message("❌ Unknown profession.", ephemeral=True)
+        return
+
+    if member and member.id != interaction.user.id:
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ Only officers can update recipes for other members.", ephemeral=True)
+            return
+        async with bot.pool.acquire() as conn:
+            target = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(member.id))
+        if not target:
+            await interaction.response.send_message(f"❌ {member.mention} isn't registered yet!", ephemeral=True)
+            return
+        target_id = str(member.id)
+        target_name = target["char_name"]
+    else:
+        async with bot.pool.acquire() as conn:
+            target = await conn.fetchrow("SELECT * FROM members WHERE discord_id = $1", str(interaction.user.id))
+        if not target:
+            await interaction.response.send_message("❌ You're not registered! Use `/register` first.", ephemeral=True)
+            return
+        target_id = str(interaction.user.id)
+        target_name = target["char_name"]
+
+    await interaction.response.send_modal(BulkUpdateModal(profession, target_id, target_name))
+
 # ── /remove_recipe ─────────────────────────────────────────────
 @bot.tree.command(name="remove_recipe", description="Remove a recipe from your list")
 @app_commands.describe(recipe_name="Name of the recipe to remove")
@@ -1148,7 +1241,8 @@ async def help_cmd(interaction: discord.Interaction):
             ("/add_recipe_for", "Add a recipe for another member (officers only)"),
             ("/remove_recipe_for", "Remove a recipe from another member (officers only)"),
             ("/remove_recipe", "Remove a recipe"),
-            ("/update_recipe", "Update notes on a recipe"),
+            ("/update_recipe", "Update notes on a single recipe"),
+            ("/update_recipes_bulk", "Update notes on multiple recipes at once"),
             ("/who_can_craft", "Find who can craft a specific item"),
             ("/my_recipes", "View your own recipes (private)"),
         ]),
